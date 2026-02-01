@@ -7,12 +7,7 @@ A Model Context Protocol (MCP) server for [Docmost](https://docmost.com/), enabl
 ### Core Management
 
 - **`create_page`**: Smart creation tool. Creates content (via import) AND handles hierarchy (nesting under a parent) in one go.
-- **`update_page`**: ⚠️ **IMPORTANT**: This tool **recreates the page** with a **new ID** and **deletes the old page**. While it preserves child pages and hierarchy, **all references to the old page ID will break**, including:
-  - Comments and discussions
-  - Page history/changelog
-
-  This is a workaround limitation due to Docmost's API not providing a native update endpoint. Use with caution!
-
+- **`update_page`**: Update a page's content and/or title. Updates are performed via real-time collaboration (WebSocket).
 - **`delete_page` / `delete_pages`**: Delete single or multiple pages at once.
 - **`move_page`**: Organize pages hierarchically by moving them to a new parent or root.
 
@@ -55,13 +50,13 @@ Add the following to your MCP configuration (e.g. `claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "docmost": {
+    "docmost-local": {
       "command": "node",
-      "args": ["/path/to/docmost-mcp/build/index.js"],
+      "args": ["./build/index.js"],
       "env": {
-        "DOCMOST_API_URL": "https://your-docmost-instance.com/api",
-        "DOCMOST_EMAIL": "your-email@example.com",
-        "DOCMOST_PASSWORD": "your-password"
+        "DOCMOST_API_URL": "http://localhost:3000/api",
+        "DOCMOST_EMAIL": "test@docmost.com",
+        "DOCMOST_PASSWORD": "test"
       }
     }
   }

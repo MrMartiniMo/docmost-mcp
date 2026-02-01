@@ -40,7 +40,7 @@ export function filterGroup(group: any) {
   };
 }
 
-export function filterPage(page: any, content?: string) {
+export function filterPage(page: any, content?: string, subpages?: any[]) {
   return {
     id: page.id,
     title: page.title,
@@ -50,8 +50,13 @@ export function filterPage(page: any, content?: string) {
     createdAt: page.createdAt,
     updatedAt: page.updatedAt,
     deletedAt: page.deletedAt,
-    // Include converted markdown content if provided
-    ...(content && { content }),
+    // Include converted markdown content if valid string (even empty)
+    ...(typeof content === "string" && { content }),
+    // Include subpages if provided
+    ...(subpages &&
+      subpages.length > 0 && {
+        subpages: subpages.map((p) => ({ id: p.id, title: p.title })),
+      }),
   };
 }
 

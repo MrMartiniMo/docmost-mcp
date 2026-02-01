@@ -134,7 +134,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
       case "callout":
         const calloutType = node.attrs?.type || "info";
         const calloutContent = nodeContent.map(processNode).join("\n");
-        return `> **${calloutType.toUpperCase()}**\n> ${calloutContent.replace(/\n/g, "\n> ")}`;
+        return `:::${calloutType.toLowerCase()}\n${calloutContent}\n:::`;
 
       case "details":
         return nodeContent.map(processNode).join("\n");
@@ -148,11 +148,11 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return `${detailsText}\n</details>`;
 
       case "mathInline":
-        const inlineMath = node.attrs?.latex || "";
+        const inlineMath = node.attrs?.text || "";
         return `$${inlineMath}$`;
 
       case "mathBlock":
-        const blockMath = node.attrs?.latex || "";
+        const blockMath = node.attrs?.text || "";
         return `$$\n${blockMath}\n$$`;
 
       case "mention":
@@ -175,7 +175,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return `🔗 [Embedded Content](${embedUrl})`;
 
       case "subpages":
-        return `📑 [Subpages List]`;
+        return "{{SUBPAGES}}";
 
       default:
         // Fallback: process children

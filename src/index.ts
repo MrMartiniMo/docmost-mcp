@@ -9,11 +9,13 @@ import {
   filterGroup,
   filterPage,
   filterSearchResult,
-} from "./filters.js";
-import { convertProseMirrorToMarkdown } from "./markdown-converter.js";
+} from "./lib/filters.js";
+import { convertProseMirrorToMarkdown } from "./lib/markdown-converter.js";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { updatePageContentRealtime } from "./lib/collaboration.js";
+import { getCollabToken, performLogin } from "./lib/auth-utils.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -49,33 +51,16 @@ class DocmostClient {
   }
 
   async login() {
-    try {
-      const response = await this.client.post("/auth/login", {
-        email: EMAIL,
-        password: PASSWORD,
-      });
-
-      // Extract token from Set-Cookie header
-      const cookies = response.headers["set-cookie"];
-      if (!cookies) {
-        throw new Error("No Set-Cookie header found in login response");
-      }
-      const authCookie = cookies.find((c: string) =>
-        c.startsWith("authToken="),
-      );
-      if (!authCookie) {
-        throw new Error("No authToken cookie found in login response");
-      }
-
-      const token = authCookie.split(";")[0].split("=")[1];
-
-      this.token = token;
-      this.client.defaults.headers.common["Authorization"] = `Bearer ${token}`;
-      // console.error("Successfully logged in to Docmost API");
-    } catch (error: any) {
-      console.error("Login failed:", error.response?.data || error.message);
-      throw error;
+    if (!EMAIL || !PASSWORD) {
+      throw new Error("Missing Credentials (DOCMOST_EMAIL, DOCMOST_PASSWORD)");
     }
+    // baseURL is already set in this.client
+    const baseURL = this.client.defaults.baseURL || "";
+
+    // Use shared auth utility
+    this.token = await performLogin(baseURL, EMAIL, PASSWORD);
+    this.client.defaults.headers.common["Authorization"] =
+      `Bearer ${this.token}`;
   }
 
   async ensureAuthenticated() {
@@ -151,16 +136,48 @@ class DocmostClient {
     return pages.map((page) => filterPage(page));
   }
 
+  async listSidebarPages(spaceId: string, pageId: string) {
+    await this.ensureAuthenticated();
+    const response = await this.client.post("/pages/sidebar-pages", {
+      spaceId,
+      pageId,
+      page: 1,
+    });
+    return response.data?.data?.items || [];
+  }
+
   async getPage(pageId: string) {
     await this.ensureAuthenticated();
     const response = await this.client.post("/pages/info", { pageId });
+    const resultData = response.data.data; // Assuming data is nested under 'data'
+
+    let content = resultData.content
+      ? convertProseMirrorToMarkdown(resultData.content)
+      : ""; // Default to empty string
+
+    // Always fetch subpages to provide context to the agent
+    let subpages: any[] = [];
+
+    try {
+      subpages = await this.listSidebarPages(resultData.spaceId, pageId);
+    } catch (e: any) {
+      console.warn("Failed to fetch subpages:", e);
+    }
+
+    // Resolve subpages if the placeholder exists
+    if (content && content.includes("{{SUBPAGES}}")) {
+      if (subpages && subpages.length > 0) {
+        const list = subpages
+          .map((p: any) => `- [${p.title}](page:${p.id})`)
+          .join("\n");
+        content = content.replace("{{SUBPAGES}}", `### Subpages\n${list}`);
+      } else {
+        content = content.replace("{{SUBPAGES}}", "");
+      }
+    }
+
     return {
-      data: filterPage(
-        response.data.data,
-        response.data.data.content
-          ? convertProseMirrorToMarkdown(response.data.data.content)
-          : undefined,
-      ),
+      data: filterPage(resultData, content, subpages),
       success: response.data.success,
     };
   }
@@ -190,9 +207,26 @@ class DocmostClient {
       }
     }
 
-    // 1. Create content via Import
-    const importRes = await this.importPage(title, content, spaceId);
-    const newPageId = importRes.data.id;
+    // 1. Create content via Import (using multipart/form-data)
+    const form = new FormData();
+    form.append("spaceId", spaceId);
+
+    const fileContent = Buffer.from(content, "utf-8");
+    form.append("file", fileContent, {
+      filename: `${title || "import"}.md`,
+      contentType: "text/markdown",
+    });
+
+    const headers = {
+      ...form.getHeaders(),
+      Authorization: `Bearer ${this.token}`,
+    };
+
+    // Use raw axios call for FormData handling
+    const response = await axios.post(`${API_URL}/pages/import`, form, {
+      headers,
+    });
+    const newPageId = response.data.data.id;
 
     // 2. Move to parent if needed
     if (parentPageId) {
@@ -205,80 +239,41 @@ class DocmostClient {
 
   /**
    * Update a page's content and optionally its title.
-   *
-   * Note: As long as Docmost doesn't provide a /pages/update endpoint, we must use
-   * a "swap-and-replace" workaround to update page content. This method:
-   * 1. Fetches the old page details (space, parent, title)
-   * 2. Identifies all child pages
-   * 3. Creates a NEW page with the updated content via /pages/import
-   * 4. Moves the new page to the old page's position (same parent)
-   * 5. Re-parents all children to the new page
-   * 6. Deletes the old page
-   *
-   * ⚠️ IMPORTANT LIMITATION: The page will get a NEW ID! Any external references
-   * to the old page ID will break. The new ID is returned in the response.
+   * Leverages WebSocket collaboration to update content without changing Page ID.
    */
   async updatePage(pageId: string, content: string, title?: string) {
     await this.ensureAuthenticated();
 
-    // 1. Get old page details to know space and parent
-    const oldPageRes = await this.getPage(pageId);
-    const oldPage = oldPageRes.data;
-    const spaceId = oldPage.spaceId;
-    const parentPageId = oldPage.parentPageId;
-    const effectiveTitle = title || oldPage.title || "Untitled";
-
-    // 2. Identify Children
-    const allPages = await this.listPages(spaceId);
-    const children = allPages.filter((p: any) => p.parentPageId === pageId);
-
-    // 3. Create NEW page
-    const importRes = await this.importPage(effectiveTitle, content, spaceId);
-    const newPageId = importRes.data.id;
-
-    // 4. Move NEW page to OLD page's position (same parent)
-    if (parentPageId) {
-      await this.movePage(newPageId, parentPageId);
+    // 1. Update Title via REST API if provided
+    if (title) {
+      await this.client.post("/pages/update", { pageId, title });
     }
 
-    // 5. Reparent Children (Rescue them!)
-    for (const child of children) {
-      await this.movePage(child.id, newPageId);
+    // 2. Update Content via WebSocket
+    let collabToken = "";
+    try {
+      const baseURL = this.client.defaults.baseURL || "";
+      collabToken = await getCollabToken(baseURL, this.token!);
+      await updatePageContentRealtime(pageId, content, collabToken, baseURL);
+    } catch (error: any) {
+      console.error(
+        "Failed to update page content via realtime collaboration:",
+        error,
+      );
+      const tokenPreview = collabToken
+        ? collabToken.substring(0, 15) + "..."
+        : "null";
+      throw new Error(
+        `Failed to update page content: ${error.message} (Token: ${tokenPreview})`,
+      );
     }
-
-    // 6. Delete OLD page
-    await this.deletePage(pageId);
 
     return {
       success: true,
-      newMessage:
-        "Page updated safely (via swap-and-replace). Children preserved.",
-      newPageId: newPageId,
-      preservedChildrenCount: children.length,
+      modified: true,
+      message: "Page updated successfully.",
+      pageId: pageId,
     };
-  }
-
-  async importPage(title: string, content: string, spaceId: string) {
-    await this.ensureAuthenticated();
-
-    const form = new FormData();
-    form.append("spaceId", spaceId);
-
-    // We create a virtual file
-    const fileContent = Buffer.from(content, "utf-8");
-    form.append("file", fileContent, {
-      filename: `${title || "import"}.md`,
-      contentType: "text/markdown",
-    });
-
-    const headers = {
-      ...form.getHeaders(),
-      Authorization: `Bearer ${this.token}`,
-    };
-
-    return axios
-      .post(`${API_URL}/pages/import`, form, { headers })
-      .then((res) => res.data);
   }
 
   async search(query: string, spaceId?: string) {
@@ -447,14 +442,11 @@ server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's content safely (preserves child pages by moving them). Note: Returns a NEW pageId.",
+      "Update a page's content and/or title via realtime collaboration (preserves Page ID and history).",
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
       content: z.string().describe("New Markdown content"),
-      title: z
-        .string()
-        .optional()
-        .describe("Optional new title (defaults to old title)"),
+      title: z.string().optional().describe("Optional new title"),
     },
   },
   async ({ pageId, content, title }) => {
