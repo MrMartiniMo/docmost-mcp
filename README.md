@@ -27,6 +27,7 @@ A Model Context Protocol (MCP) server for [Docmost](https://docmost.com/), enabl
 - **`create_comment`**: Create a page-level or inline comment. Content is provided as Markdown and automatically converted to ProseMirror JSON. Supports replies via `parentCommentId`.
 - **`update_comment`**: Update an existing comment's content (creator only).
 - **`delete_comment`**: Delete a comment (creator or space admin only).
+- **`check_new_comments`**: Check for new comments across a space (or a page subtree) since a given timestamp. Efficiently filters by `updatedAt` before fetching comments.
 
 ### Technical Details
 

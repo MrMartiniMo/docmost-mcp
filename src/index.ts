@@ -418,6 +418,91 @@ class DocmostClient {
       .post("/comments/delete", { commentId })
       .then((res) => res.data);
   }
+
+  /**
+   * Check for new comments across pages in a space (optionally scoped to a subtree).
+   * 1. Fetch all pages in space, filter by updatedAt > since
+   * 2. If parentPageId given, keep only descendants of that page
+   * 3. For matching pages, fetch comments and filter by createdAt > since
+   */
+  async checkNewComments(
+    spaceId: string,
+    since: string,
+    parentPageId?: string,
+  ) {
+    await this.ensureAuthenticated();
+
+    const sinceDate = new Date(since);
+
+    // 1. Get all pages in the space
+    const allPages = await this.paginateAll<any>("/pages/recent", { spaceId });
+
+    // 2. If parentPageId specified, build set of descendant page IDs
+    let allowedPageIds: Set<string> | null = null;
+    if (parentPageId) {
+      allowedPageIds = new Set<string>();
+      // BFS to collect all descendants
+      const pageMap = new Map<string, any[]>();
+      for (const page of allPages) {
+        const pid = page.parentPageId || "__root__";
+        if (!pageMap.has(pid)) pageMap.set(pid, []);
+        pageMap.get(pid)!.push(page);
+      }
+      const queue = [parentPageId];
+      allowedPageIds.add(parentPageId);
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        const children = pageMap.get(current) || [];
+        for (const child of children) {
+          allowedPageIds.add(child.id);
+          queue.push(child.id);
+        }
+      }
+    }
+
+    // 3. Filter pages by updatedAt > since and optional subtree
+    const recentlyUpdated = allPages.filter((page: any) => {
+      if (new Date(page.updatedAt) <= sinceDate) return false;
+      if (allowedPageIds && !allowedPageIds.has(page.id)) return false;
+      return true;
+    });
+
+    // 4. Fetch comments for each updated page and filter by createdAt > since
+    const results: any[] = [];
+    for (const page of recentlyUpdated) {
+      try {
+        const comments = await this.listComments(page.id);
+        const newComments = comments.filter(
+          (c: any) => new Date(c.createdAt) > sinceDate,
+        );
+        if (newComments.length > 0) {
+          results.push({
+            pageId: page.id,
+            pageTitle: page.title,
+            comments: newComments,
+          });
+        }
+      } catch (e: any) {
+        // Skip pages with errors (e.g. deleted between calls)
+      }
+    }
+
+    const totalNewComments = results.reduce(
+      (sum, r) => sum + r.comments.length,
+      0,
+    );
+
+    return {
+      since,
+      scope: parentPageId
+        ? `subtree of ${parentPageId}`
+        : `space ${spaceId}`,
+      checkedPages: recentlyUpdated.length,
+      pagesWithNewComments: results.length,
+      totalNewComments,
+      comments: results,
+    };
+  }
 }
 
 const docmostClient = new DocmostClient(API_URL);
@@ -740,6 +825,39 @@ server.registerTool(
         { type: "text", text: `Successfully deleted comment ${commentId}` },
       ],
     };
+  },
+);
+
+// Tool: check_new_comments
+server.registerTool(
+  "check_new_comments",
+  {
+    description:
+      "Check for new comments across pages in a space since a given timestamp. " +
+      "Optionally scope to a page subtree (folder). Returns only comments created after the specified time.",
+    inputSchema: {
+      spaceId: z.string().describe("Space ID to check for new comments"),
+      since: z
+        .string()
+        .describe(
+          "ISO 8601 timestamp — only return comments created after this time (e.g. '2026-03-10T00:00:00Z')",
+        ),
+      parentPageId: z
+        .string()
+        .optional()
+        .describe(
+          "Optional root page ID to scope the check to a subtree (folder). " +
+          "Only pages under this parent will be checked.",
+        ),
+    },
+  },
+  async ({ spaceId, since, parentPageId }) => {
+    const result = await docmostClient.checkNewComments(
+      spaceId,
+      since,
+      parentPageId,
+    );
+    return jsonContent(result);
   },
 );
 
