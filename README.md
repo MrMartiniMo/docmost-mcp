@@ -20,6 +20,14 @@ A Model Context Protocol (MCP) server for [Docmost](https://docmost.com/), enabl
 - **`list_pages`**: List pages within a space (ordered by `updatedAt` descending).
 - **`get_page`**: Retrieve full content and metadata of a specific page.
 
+### Comments
+
+- **`list_comments`**: List all comments on a page with content converted to Markdown.
+- **`get_comment`**: Retrieve a single comment by ID.
+- **`create_comment`**: Create a page-level or inline comment. Content is provided as Markdown and automatically converted to ProseMirror JSON. Supports replies via `parentCommentId`.
+- **`update_comment`**: Update an existing comment's content (creator only).
+- **`delete_comment`**: Delete a comment (creator or space admin only).
+
 ### Technical Details
 
 - **Automatic Markdown Conversion**: Page content is automatically converted from Docmost's internal ProseMirror/TipTap JSON format to clean Markdown for easy agent consumption. Supports all Docmost extensions including callouts, task lists, math blocks, embeds, and more.

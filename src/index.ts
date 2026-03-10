@@ -8,6 +8,7 @@ import {
   filterSpace,
   filterGroup,
   filterPage,
+  filterComment,
   filterSearchResult,
 } from "./lib/filters.js";
 import { convertProseMirrorToMarkdown } from "./lib/markdown-converter.js";
@@ -16,6 +17,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { updatePageContentRealtime } from "./lib/collaboration.js";
 import { getCollabToken, performLogin } from "./lib/auth-utils.js";
+import { markdownToTiptapJson } from "./lib/markdown-to-json.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -328,6 +330,80 @@ class DocmostClient {
     );
     return Promise.all(promises);
   }
+
+  // --- Comment Methods ---
+
+  async listComments(pageId: string) {
+    const comments = await this.paginateAll("/comments", { pageId });
+    return comments.map((comment: any) => {
+      const markdown = comment.content
+        ? convertProseMirrorToMarkdown(comment.content)
+        : "";
+      return filterComment(comment, markdown);
+    });
+  }
+
+  async getComment(commentId: string) {
+    await this.ensureAuthenticated();
+    const response = await this.client.post("/comments/info", { commentId });
+    const comment = response.data.data || response.data;
+    const markdown = comment.content
+      ? convertProseMirrorToMarkdown(comment.content)
+      : "";
+    return {
+      data: filterComment(comment, markdown),
+      success: true,
+    };
+  }
+
+  async createComment(
+    pageId: string,
+    content: string,
+    type: "page" | "inline" = "page",
+    selection?: string,
+    parentCommentId?: string,
+  ) {
+    await this.ensureAuthenticated();
+    const jsonContent = await markdownToTiptapJson(content);
+    const payload: Record<string, any> = {
+      pageId,
+      content: jsonContent,
+      type,
+    };
+    if (selection) payload.selection = selection;
+    if (parentCommentId) payload.parentCommentId = parentCommentId;
+
+    const response = await this.client.post("/comments/create", payload);
+    const comment = response.data.data || response.data;
+    const markdown = comment.content
+      ? convertProseMirrorToMarkdown(comment.content)
+      : content;
+    return {
+      data: filterComment(comment, markdown),
+      success: true,
+    };
+  }
+
+  async updateComment(commentId: string, content: string) {
+    await this.ensureAuthenticated();
+    const jsonContent = await markdownToTiptapJson(content);
+    const response = await this.client.post("/comments/update", {
+      commentId,
+      content: jsonContent,
+    });
+    return {
+      success: true,
+      commentId,
+      message: "Comment updated successfully.",
+    };
+  }
+
+  async deleteComment(commentId: string) {
+    await this.ensureAuthenticated();
+    return this.client
+      .post("/comments/delete", { commentId })
+      .then((res) => res.data);
+  }
 }
 
 const docmostClient = new DocmostClient(API_URL);
@@ -541,6 +617,115 @@ server.registerTool(
   async ({ query, spaceId }) => {
     const result = await docmostClient.search(query, spaceId);
     return jsonContent(result);
+  },
+);
+
+// --- Comment Tools ---
+
+// Tool: list_comments
+server.registerTool(
+  "list_comments",
+  {
+    description:
+      "List all comments on a page. Returns comments with content converted to Markdown.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to list comments for"),
+    },
+  },
+  async ({ pageId }) => {
+    const comments = await docmostClient.listComments(pageId);
+    return jsonContent(comments);
+  },
+);
+
+// Tool: get_comment
+server.registerTool(
+  "get_comment",
+  {
+    description: "Get a single comment by ID with content as Markdown.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment"),
+    },
+  },
+  async ({ commentId }) => {
+    const comment = await docmostClient.getComment(commentId);
+    return jsonContent(comment);
+  },
+);
+
+// Tool: create_comment
+server.registerTool(
+  "create_comment",
+  {
+    description:
+      "Create a new comment on a page. Content is provided as Markdown and automatically converted to the required format.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to comment on"),
+      content: z.string().describe("Comment content in Markdown format"),
+      type: z
+        .enum(["page", "inline"])
+        .optional()
+        .describe(
+          "Comment type: 'page' for general page comment (default), 'inline' for text selection comment",
+        ),
+      selection: z
+        .string()
+        .optional()
+        .describe(
+          "Selected text for inline comments (max 250 chars). Required when type is 'inline'.",
+        ),
+      parentCommentId: z
+        .string()
+        .optional()
+        .describe("Parent comment ID to create a reply (max 2 nesting levels)"),
+    },
+  },
+  async ({ pageId, content, type, selection, parentCommentId }) => {
+    const result = await docmostClient.createComment(
+      pageId,
+      content,
+      type || "page",
+      selection,
+      parentCommentId,
+    );
+    return jsonContent(result);
+  },
+);
+
+// Tool: update_comment
+server.registerTool(
+  "update_comment",
+  {
+    description:
+      "Update an existing comment's content. Only the comment creator can update it. Content is provided as Markdown.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment to update"),
+      content: z.string().describe("New comment content in Markdown format"),
+    },
+  },
+  async ({ commentId, content }) => {
+    const result = await docmostClient.updateComment(commentId, content);
+    return jsonContent(result);
+  },
+);
+
+// Tool: delete_comment
+server.registerTool(
+  "delete_comment",
+  {
+    description:
+      "Delete a comment. Only the comment creator or space admin can delete it.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment to delete"),
+    },
+  },
+  async ({ commentId }) => {
+    await docmostClient.deleteComment(commentId);
+    return {
+      content: [
+        { type: "text", text: `Successfully deleted comment ${commentId}` },
+      ],
+    };
   },
 );
 

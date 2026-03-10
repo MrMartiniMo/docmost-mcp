@@ -60,6 +60,21 @@ export function filterPage(page: any, content?: string, subpages?: any[]) {
   };
 }
 
+export function filterComment(comment: any, markdownContent?: string) {
+  return {
+    id: comment.id,
+    pageId: comment.pageId,
+    content: markdownContent ?? comment.content,
+    selection: comment.selection || null,
+    type: comment.type || "page",
+    parentCommentId: comment.parentCommentId || null,
+    creatorId: comment.creatorId,
+    creatorName: comment.creator?.name || null,
+    createdAt: comment.createdAt,
+    editedAt: comment.editedAt || null,
+  };
+}
+
 export function filterSearchResult(result: any) {
   return {
     id: result.id,
