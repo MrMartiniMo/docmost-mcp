@@ -334,8 +334,22 @@ class DocmostClient {
   // --- Comment Methods ---
 
   async listComments(pageId: string) {
-    const comments = await this.paginateAll("/comments", { pageId });
-    return comments.map((comment: any) => {
+    await this.ensureAuthenticated();
+    let allComments: any[] = [];
+    let cursor: string | null = null;
+
+    do {
+      const payload: Record<string, any> = { pageId, limit: 100 };
+      if (cursor) payload.cursor = cursor;
+
+      const response = await this.client.post("/comments", payload);
+      const data = response.data.data || response.data;
+      const items = data.items || [];
+      allComments = allComments.concat(items);
+      cursor = data.meta?.nextCursor || null;
+    } while (cursor);
+
+    return allComments.map((comment: any) => {
       const markdown = comment.content
         ? convertProseMirrorToMarkdown(comment.content)
         : "";
@@ -367,7 +381,7 @@ class DocmostClient {
     const jsonContent = await markdownToTiptapJson(content);
     const payload: Record<string, any> = {
       pageId,
-      content: jsonContent,
+      content: JSON.stringify(jsonContent),
       type,
     };
     if (selection) payload.selection = selection;
@@ -389,7 +403,7 @@ class DocmostClient {
     const jsonContent = await markdownToTiptapJson(content);
     const response = await this.client.post("/comments/update", {
       commentId,
-      content: jsonContent,
+      content: JSON.stringify(jsonContent),
     });
     return {
       success: true,
