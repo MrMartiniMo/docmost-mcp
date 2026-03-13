@@ -29,6 +29,7 @@
     "@tiptap/core": "^3.18.0",
     "@tiptap/extension-image": "^3.18.0",
     "@tiptap/extension-link": "^3.18.0",
+    "@tiptap/extension-table": "^3.18.0",
     "@tiptap/html": "^3.18.0",
     "@tiptap/starter-kit": "^3.18.0",
     "@types/jsdom": "^27.0.0",
