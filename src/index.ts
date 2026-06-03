@@ -130,10 +130,22 @@ class DocmostClient {
     return groups.map((group) => filterGroup(group));
   }
 
-  async listPages(spaceId?: string) {
-    const payload = spaceId ? { spaceId } : {};
-    const pages = await this.paginateAll("/pages/recent", payload);
-    return pages.map((page) => filterPage(page));
+  async listPages(spaceId?: string, limit: number = 50) {
+    await this.ensureAuthenticated();
+
+    // Do NOT paginate the whole space. /pages/recent over a large space
+    // returns hundreds of pages whose serialized JSON exceeds the MCP
+    // response limit / times out. Fetch a single bounded page of the most
+    // recent results instead (the endpoint is already ordered by updatedAt
+    // descending).
+    const clampedLimit = Math.max(1, Math.min(100, limit));
+    const payload: Record<string, any> = { limit: clampedLimit, page: 1 };
+    if (spaceId) payload.spaceId = spaceId;
+
+    const response = await this.client.post("/pages/recent", payload);
+    const data = response.data;
+    const items = data.data?.items || data.items || [];
+    return items.map((page: any) => filterPage(page));
   }
 
   async listSidebarPages(spaceId: string, pageId: string) {
@@ -283,13 +295,19 @@ class DocmostClient {
       spaceId,
     });
 
-    // Filter search results (data is directly an array)
-    const items = response.data?.data || [];
-    const filteredItems = items.map((item: any) => filterSearchResult(item));
+    // Docmost returns search hits either as a bare array or, in newer
+    // versions, as a paginated object { items: [...] } under data.data.
+    // Normalize both so we never call .map on a non-array (the cause of
+    // "items.map is not a function").
+    const payload = response.data?.data;
+    const rawItems = Array.isArray(payload) ? payload : (payload?.items ?? []);
+    const filteredItems = rawItems.map((item: any) =>
+      filterSearchResult(item),
+    );
 
     return {
       items: filteredItems,
-      success: response.data?.success || false,
+      success: response.data?.success ?? false,
     };
   }
 
@@ -384,13 +402,21 @@ server.registerTool(
 server.registerTool(
   "list_pages",
   {
-    description: "List pages in a space ordered by updatedAt (descending).",
+    description:
+      "List the most recently updated pages in a space (ordered by updatedAt descending). Returns a single bounded page of results, not the entire space.",
     inputSchema: {
       spaceId: z.string().optional(),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max pages to return, most recent first (default 50)."),
     },
   },
-  async ({ spaceId }) => {
-    const result = await docmostClient.listPages(spaceId);
+  async ({ spaceId, limit }) => {
+    const result = await docmostClient.listPages(spaceId, limit);
     return jsonContent(result);
   },
 );
