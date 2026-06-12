@@ -43,6 +43,7 @@ export function filterGroup(group: any) {
 export function filterPage(page: any, content?: string, subpages?: any[]) {
   return {
     id: page.id,
+    slugId: page.slugId,
     title: page.title,
     parentPageId: page.parentPageId,
     spaceId: page.spaceId,

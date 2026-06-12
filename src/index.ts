@@ -1,21 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import FormData from "form-data";
-import axios, { AxiosInstance } from "axios";
 import { z } from "zod";
-import {
-  filterWorkspace,
-  filterSpace,
-  filterGroup,
-  filterPage,
-  filterSearchResult,
-} from "./lib/filters.js";
-import { convertProseMirrorToMarkdown } from "./lib/markdown-converter.js";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { updatePageContentRealtime } from "./lib/collaboration.js";
-import { getCollabToken, performLogin } from "./lib/auth-utils.js";
+import { DocmostClient } from "./client.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -36,301 +25,7 @@ if (!API_URL || !EMAIL || !PASSWORD) {
   process.exit(1);
 }
 
-class DocmostClient {
-  // ... [Client Implementation stays exactly the same] ...
-  private client: AxiosInstance;
-  private token: string | null = null;
-
-  constructor(baseURL: string) {
-    this.client = axios.create({
-      baseURL,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-  }
-
-  async login() {
-    if (!EMAIL || !PASSWORD) {
-      throw new Error("Missing Credentials (DOCMOST_EMAIL, DOCMOST_PASSWORD)");
-    }
-    // baseURL is already set in this.client
-    const baseURL = this.client.defaults.baseURL || "";
-
-    // Use shared auth utility
-    this.token = await performLogin(baseURL, EMAIL, PASSWORD);
-    this.client.defaults.headers.common["Authorization"] =
-      `Bearer ${this.token}`;
-  }
-
-  async ensureAuthenticated() {
-    if (!this.token) {
-      await this.login();
-    }
-  }
-
-  /**
-   * Generic pagination handler for Docmost API endpoints
-   * @param endpoint - The API endpoint path (e.g., "/spaces", "/pages/recent")
-   * @param basePayload - Base payload object to send with each request
-   * @param limit - Items per page (min: 1, max: 100, default: 100)
-   * @returns All items collected from all pages
-   */
-  async paginateAll<T = any>(
-    endpoint: string,
-    basePayload: Record<string, any> = {},
-    limit: number = 100,
-  ): Promise<T[]> {
-    await this.ensureAuthenticated();
-
-    // Clamp limit between 1 and 100
-    const clampedLimit = Math.max(1, Math.min(100, limit));
-
-    let page = 1;
-    let allItems: T[] = [];
-    let hasNextPage = true;
-
-    while (hasNextPage) {
-      const response = await this.client.post(endpoint, {
-        ...basePayload,
-        limit: clampedLimit,
-        page,
-      });
-
-      const data = response.data;
-
-      // Handle both direct data.items and data.data.items structures
-      const items = data.data?.items || data.items || [];
-      const meta = data.data?.meta || data.meta;
-
-      allItems = allItems.concat(items);
-      hasNextPage = meta?.hasNextPage || false;
-      page++;
-    }
-
-    return allItems;
-  }
-
-  async getWorkspace() {
-    await this.ensureAuthenticated();
-    const response = await this.client.post("/workspace/info", {});
-    return {
-      data: filterWorkspace(response.data.data),
-      success: response.data.success,
-    };
-  }
-
-  async getSpaces() {
-    const spaces = await this.paginateAll("/spaces", {});
-    return spaces.map((space) => filterSpace(space));
-  }
-
-  async getGroups() {
-    const groups = await this.paginateAll("/groups", {});
-    return groups.map((group) => filterGroup(group));
-  }
-
-  async listPages(spaceId?: string) {
-    const payload = spaceId ? { spaceId } : {};
-    const pages = await this.paginateAll("/pages/recent", payload);
-    return pages.map((page) => filterPage(page));
-  }
-
-  async listSidebarPages(spaceId: string, pageId: string) {
-    await this.ensureAuthenticated();
-    const response = await this.client.post("/pages/sidebar-pages", {
-      spaceId,
-      pageId,
-      page: 1,
-    });
-    return response.data?.data?.items || [];
-  }
-
-  async getPage(pageId: string) {
-    await this.ensureAuthenticated();
-    const response = await this.client.post("/pages/info", { pageId });
-    const resultData = response.data.data; // Assuming data is nested under 'data'
-
-    let content = resultData.content
-      ? convertProseMirrorToMarkdown(resultData.content)
-      : ""; // Default to empty string
-
-    // Always fetch subpages to provide context to the agent
-    let subpages: any[] = [];
-
-    try {
-      subpages = await this.listSidebarPages(resultData.spaceId, pageId);
-    } catch (e: any) {
-      console.warn("Failed to fetch subpages:", e);
-    }
-
-    // Resolve subpages if the placeholder exists
-    if (content && content.includes("{{SUBPAGES}}")) {
-      if (subpages && subpages.length > 0) {
-        const list = subpages
-          .map((p: any) => `- [${p.title}](page:${p.id})`)
-          .join("\n");
-        content = content.replace("{{SUBPAGES}}", `### Subpages\n${list}`);
-      } else {
-        content = content.replace("{{SUBPAGES}}", "");
-      }
-    }
-
-    return {
-      data: filterPage(resultData, content, subpages),
-      success: response.data.success,
-    };
-  }
-
-  /**
-   * Create a new page with title and content.
-   *
-   * Note: As long as Docmost doesn't provide a /pages/create endpoint that allows
-   * setting content directly, we must use the /pages/import workaround to create
-   * pages with initial content. This method:
-   * 1. Creates the page via /pages/import (which supports content)
-   * 2. Moves it to the correct parent if specified
-   */
-  async createPage(
-    title: string,
-    content: string,
-    spaceId: string,
-    parentPageId?: string,
-  ) {
-    await this.ensureAuthenticated();
-
-    if (parentPageId) {
-      try {
-        await this.getPage(parentPageId);
-      } catch (e) {
-        throw new Error(`Parent page with ID ${parentPageId} not found.`);
-      }
-    }
-
-    // 1. Create content via Import (using multipart/form-data)
-    const form = new FormData();
-    form.append("spaceId", spaceId);
-
-    const fileContent = Buffer.from(content, "utf-8");
-    form.append("file", fileContent, {
-      filename: `${title || "import"}.md`,
-      contentType: "text/markdown",
-    });
-
-    const headers = {
-      ...form.getHeaders(),
-      Authorization: `Bearer ${this.token}`,
-    };
-
-    // Use raw axios call for FormData handling
-    const response = await axios.post(`${API_URL}/pages/import`, form, {
-      headers,
-    });
-    const newPageId = response.data.data.id;
-
-    // 2. Move to parent if needed
-    if (parentPageId) {
-      await this.movePage(newPageId, parentPageId);
-    }
-
-    // Return the final page object
-    return this.getPage(newPageId);
-  }
-
-  /**
-   * Update a page's content and optionally its title.
-   * Leverages WebSocket collaboration to update content without changing Page ID.
-   */
-  async updatePage(pageId: string, content: string, title?: string) {
-    await this.ensureAuthenticated();
-
-    // 1. Update Title via REST API if provided
-    if (title) {
-      await this.client.post("/pages/update", { pageId, title });
-    }
-
-    // 2. Update Content via WebSocket
-    let collabToken = "";
-    try {
-      const baseURL = this.client.defaults.baseURL || "";
-      collabToken = await getCollabToken(baseURL, this.token!);
-      await updatePageContentRealtime(pageId, content, collabToken, baseURL);
-    } catch (error: any) {
-      console.error(
-        "Failed to update page content via realtime collaboration:",
-        error,
-      );
-      const tokenPreview = collabToken
-        ? collabToken.substring(0, 15) + "..."
-        : "null";
-      throw new Error(
-        `Failed to update page content: ${error.message} (Token: ${tokenPreview})`,
-      );
-    }
-
-    return {
-      success: true,
-      modified: true,
-      message: "Page updated successfully.",
-      pageId: pageId,
-    };
-  }
-
-  async search(query: string, spaceId?: string) {
-    await this.ensureAuthenticated();
-    const response = await this.client.post("/search", {
-      query,
-      spaceId,
-    });
-
-    // Filter search results (data is directly an array)
-    const items = response.data?.data || [];
-    const filteredItems = items.map((item: any) => filterSearchResult(item));
-
-    return {
-      items: filteredItems,
-      success: response.data?.success || false,
-    };
-  }
-
-  async movePage(
-    pageId: string,
-    parentPageId: string | null,
-    position?: string,
-  ) {
-    await this.ensureAuthenticated();
-    // Docmost requires position >= 5 chars.
-    const validPosition = position || "a00000";
-
-    return this.client
-      .post("/pages/move", {
-        pageId,
-        parentPageId,
-        position: validPosition,
-      })
-      .then((res) => res.data);
-  }
-
-  async deletePage(pageId: string) {
-    await this.ensureAuthenticated();
-    return this.client
-      .post("/pages/delete", { pageId })
-      .then((res) => res.data);
-  }
-
-  async deletePages(pageIds: string[]) {
-    await this.ensureAuthenticated();
-    const promises = pageIds.map((id) =>
-      this.client
-        .post("/pages/delete", { pageId: id })
-        .then(() => ({ id, success: true }))
-        .catch((err: any) => ({ id, success: false, error: err.message })),
-    );
-    return Promise.all(promises);
-  }
-}
-
-const docmostClient = new DocmostClient(API_URL);
+const docmostClient = new DocmostClient(API_URL, EMAIL, PASSWORD);
 
 // --- Modern McpServer Implementation ---
 
@@ -344,7 +39,7 @@ const jsonContent = (data: any) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
 
-// Tool: list_workspaces
+// Tool: get_workspace
 server.registerTool(
   "get_workspace",
   {
@@ -399,7 +94,10 @@ server.registerTool(
 server.registerTool(
   "get_page",
   {
-    description: "Get details and content of a specific page by ID",
+    description:
+      "Get page details with content converted to Markdown. The conversion is " +
+      "LOSSY (block ids, exact table/callout structure are approximated); for a " +
+      "lossless representation use get_page_json.",
     inputSchema: {
       pageId: z.string(),
     },
@@ -410,7 +108,26 @@ server.registerTool(
   },
 );
 
-// Tool: create_page (Smart)
+// Tool: get_page_json
+server.registerTool(
+  "get_page_json",
+  {
+    description:
+      "Get page details with the raw ProseMirror JSON content (lossless: " +
+      "includes block ids, callouts, tables, link/image attributes) plus the " +
+      "slugId used in URLs. Use together with update_page_json for precise " +
+      "structural edits, or edit_page_text for simple text fixes.",
+    inputSchema: {
+      pageId: z.string(),
+    },
+  },
+  async ({ pageId }) => {
+    const page = await docmostClient.getPageJson(pageId);
+    return jsonContent(page);
+  },
+);
+
+// Tool: create_page
 server.registerTool(
   "create_page",
   {
@@ -437,12 +154,16 @@ server.registerTool(
   },
 );
 
-// Tool: update_page (Safe)
+// Tool: update_page
 server.registerTool(
   "update_page",
   {
     description:
-      "Update a page's content and/or title via realtime collaboration (preserves Page ID and history).",
+      "Replace a page's content from Markdown (and/or set a new title). " +
+      "Re-imports the WHOLE document: block ids regenerate and only " +
+      "markdown-expressible structure survives (tables and :::type callout " +
+      "blocks are supported). For small wording fixes prefer edit_page_text; " +
+      "for precise structural edits use get_page_json + update_page_json.",
     inputSchema: {
       pageId: z.string().describe("ID of the page to update"),
       content: z.string().describe("New Markdown content"),
@@ -451,6 +172,115 @@ server.registerTool(
   },
   async ({ pageId, content, title }) => {
     const result = await docmostClient.updatePage(pageId, content, title);
+    return jsonContent(result);
+  },
+);
+
+// Tool: update_page_json
+server.registerTool(
+  "update_page_json",
+  {
+    description:
+      "Replace a page's content with a raw ProseMirror JSON document " +
+      "(lossless write: preserves the block ids, callouts, tables and " +
+      "attributes you pass in). Typical flow: get_page_json -> modify the " +
+      "JSON -> update_page_json. Keep existing node ids intact so heading " +
+      "anchors and history stay stable.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to update"),
+      content: z
+        .any()
+        .describe('ProseMirror document: {"type":"doc","content":[...]}'),
+      title: z.string().optional().describe("Optional new title"),
+    },
+  },
+  async ({ pageId, content, title }) => {
+    const doc =
+      typeof content === "string" ? JSON.parse(content) : content;
+    const result = await docmostClient.updatePageJson(pageId, doc, title);
+    return jsonContent(result);
+  },
+);
+
+// Tool: edit_page_text
+server.registerTool(
+  "edit_page_text",
+  {
+    description:
+      "Surgical find/replace inside a page's text. Preserves ALL structure: " +
+      "block ids, marks, links, callouts, tables. Each `find` must match " +
+      "exactly once (or set replaceAll). A match must lie inside one " +
+      "formatting run; if the target text crosses bold/link boundaries the " +
+      "tool reports it — use a shorter fragment or update_page_json then. " +
+      "This is the preferred tool for fixing wording, typos, numbers, names.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to edit"),
+      edits: z
+        .array(
+          z.object({
+            find: z.string().describe("Exact text to find"),
+            replace: z.string().describe("Replacement text (may be empty)"),
+            replaceAll: z
+              .boolean()
+              .optional()
+              .describe("Replace every occurrence (default: must match once)"),
+          }),
+        )
+        .min(1)
+        .describe("List of find/replace operations, applied in order"),
+    },
+  },
+  async ({ pageId, edits }) => {
+    const result = await docmostClient.editPageText(pageId, edits);
+    return jsonContent(result);
+  },
+);
+
+// Tool: share_page
+server.registerTool(
+  "share_page",
+  {
+    description:
+      "Make a page publicly accessible (idempotent) and return its public " +
+      "URL. The URL format is <app>/share/<key>/p/<slugId>.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to share"),
+      searchIndexing: z
+        .boolean()
+        .optional()
+        .describe("Allow search engines to index the page (default true)"),
+    },
+  },
+  async ({ pageId, searchIndexing }) => {
+    const result = await docmostClient.sharePage(pageId, searchIndexing ?? true);
+    return jsonContent(result);
+  },
+);
+
+// Tool: unshare_page
+server.registerTool(
+  "unshare_page",
+  {
+    description: "Remove the public share of a page (revokes the public URL).",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to unshare"),
+    },
+  },
+  async ({ pageId }) => {
+    const result = await docmostClient.unsharePage(pageId);
+    return jsonContent(result);
+  },
+);
+
+// Tool: list_shares
+server.registerTool(
+  "list_shares",
+  {
+    description:
+      "List all public shares in the workspace with page titles and public URLs.",
+  },
+  async () => {
+    const result = await docmostClient.listShares();
     return jsonContent(result);
   },
 );
@@ -479,8 +309,6 @@ server.registerTool(
     },
   },
   async ({ pageId, parentPageId, position }) => {
-    // Ensure parentPageId is null if string "null" or empty is passed, or undefined
-    // Note: Zod handles type checking, but we double check for empty strings just in case
     const finalParentId =
       parentPageId === "" || parentPageId === "null" ? null : parentPageId;
 
@@ -488,7 +316,7 @@ server.registerTool(
     return {
       content: [
         {
-          type: "text",
+          type: "text" as const,
           text: `Successfully moved page ${pageId} to parent ${finalParentId || "root"}`,
         },
       ],
@@ -508,7 +336,9 @@ server.registerTool(
   async ({ pageId }) => {
     await docmostClient.deletePage(pageId);
     return {
-      content: [{ type: "text", text: `Successfully deleted page ${pageId}` }],
+      content: [
+        { type: "text" as const, text: `Successfully deleted page ${pageId}` },
+      ],
     };
   },
 );
