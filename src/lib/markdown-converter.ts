@@ -121,8 +121,15 @@ export function convertProseMirrorToMarkdown(content: any): string {
         const youtubeUrl = node.attrs?.src || "";
         return `📺 [YouTube Video](${youtubeUrl})`;
 
-      case "table":
-        return nodeContent.map(processNode).join("\n");
+      case "table": {
+        // Emit a GFM table: header row + separator, so the markdown can be
+        // parsed back into a table on re-import.
+        const rows = nodeContent.map(processNode);
+        if (rows.length === 0) return "";
+        const columns = (nodeContent[0]?.content || []).length || 1;
+        const separator = "| " + Array(columns).fill("---").join(" | ") + " |";
+        return [rows[0], separator, ...rows.slice(1)].join("\n");
+      }
 
       case "tableRow":
         return "| " + nodeContent.map(processNode).join(" | ") + " |";
