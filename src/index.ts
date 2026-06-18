@@ -405,10 +405,13 @@ class DocmostClient {
       commentId,
       content: JSON.stringify(jsonContent),
     });
+    const comment = response.data.data || response.data;
+    const markdown = comment?.content
+      ? convertProseMirrorToMarkdown(comment.content)
+      : content;
     return {
+      data: filterComment(comment, markdown),
       success: true,
-      commentId,
-      message: "Comment updated successfully.",
     };
   }
 
@@ -421,9 +424,13 @@ class DocmostClient {
 
   /**
    * Check for new comments across pages in a space (optionally scoped to a subtree).
-   * 1. Fetch all pages in space, filter by updatedAt > since
+   * 1. Fetch all pages in space
    * 2. If parentPageId given, keep only descendants of that page
-   * 3. For matching pages, fetch comments and filter by createdAt > since
+   * 3. Fetch comments for all pages in scope in parallel, filter by createdAt > since
+   *
+   * NOTE: We intentionally do NOT pre-filter pages by updatedAt — Docmost does
+   * not bump page.updatedAt when a comment is added, so such a filter would
+   * silently miss comments on pages that were not otherwise edited.
    */
   async checkNewComments(
     spaceId: string,
@@ -433,15 +440,17 @@ class DocmostClient {
     await this.ensureAuthenticated();
 
     const sinceDate = new Date(since);
+    if (isNaN(sinceDate.getTime())) {
+      throw new Error(`Invalid 'since' timestamp: ${since}`);
+    }
 
     // 1. Get all pages in the space
     const allPages = await this.paginateAll<any>("/pages/recent", { spaceId });
 
-    // 2. If parentPageId specified, build set of descendant page IDs
+    // 2. If parentPageId specified, build set of descendant page IDs via BFS
     let allowedPageIds: Set<string> | null = null;
     if (parentPageId) {
       allowedPageIds = new Set<string>();
-      // BFS to collect all descendants
       const pageMap = new Map<string, any[]>();
       for (const page of allPages) {
         const pid = page.parentPageId || "__root__";
@@ -452,40 +461,40 @@ class DocmostClient {
       allowedPageIds.add(parentPageId);
       while (queue.length > 0) {
         const current = queue.shift()!;
-        const children = pageMap.get(current) || [];
-        for (const child of children) {
+        for (const child of pageMap.get(current) || []) {
           allowedPageIds.add(child.id);
           queue.push(child.id);
         }
       }
     }
 
-    // 3. Filter pages by updatedAt > since and optional subtree
-    const recentlyUpdated = allPages.filter((page: any) => {
-      if (new Date(page.updatedAt) <= sinceDate) return false;
-      if (allowedPageIds && !allowedPageIds.has(page.id)) return false;
-      return true;
-    });
+    // 3. Scope to subtree if requested
+    const pagesInScope = allPages.filter(
+      (page: any) => !allowedPageIds || allowedPageIds.has(page.id),
+    );
 
-    // 4. Fetch comments for each updated page and filter by createdAt > since
-    const results: any[] = [];
-    for (const page of recentlyUpdated) {
-      try {
-        const comments = await this.listComments(page.id);
-        const newComments = comments.filter(
-          (c: any) => new Date(c.createdAt) > sinceDate,
-        );
-        if (newComments.length > 0) {
-          results.push({
-            pageId: page.id,
-            pageTitle: page.title,
-            comments: newComments,
-          });
+    // 4. Fetch comments for all pages in parallel, filter by createdAt > since
+    let skippedPages = 0;
+    const settled = await Promise.all(
+      pagesInScope.map(async (page: any) => {
+        try {
+          const comments = await this.listComments(page.id);
+          const newComments = comments.filter(
+            (c: any) => new Date(c.createdAt) > sinceDate,
+          );
+          return newComments.length > 0
+            ? { pageId: page.id, pageTitle: page.title, comments: newComments }
+            : null;
+        } catch {
+          skippedPages++;
+          return null;
         }
-      } catch (e: any) {
-        // Skip pages with errors (e.g. deleted between calls)
-      }
-    }
+      }),
+    );
+
+    const results = settled.filter(
+      (r): r is NonNullable<typeof r> => r !== null,
+    );
 
     const totalNewComments = results.reduce(
       (sum, r) => sum + r.comments.length,
@@ -497,9 +506,10 @@ class DocmostClient {
       scope: parentPageId
         ? `subtree of ${parentPageId}`
         : `space ${spaceId}`,
-      checkedPages: recentlyUpdated.length,
+      checkedPages: pagesInScope.length,
       pagesWithNewComments: results.length,
       totalNewComments,
+      skippedPages,
       comments: results,
     };
   }
@@ -780,6 +790,9 @@ server.registerTool(
     },
   },
   async ({ pageId, content, type, selection, parentCommentId }) => {
+    if (type === "inline" && !selection) {
+      throw new Error("'selection' is required when type is 'inline'");
+    }
     const result = await docmostClient.createComment(
       pageId,
       content,
