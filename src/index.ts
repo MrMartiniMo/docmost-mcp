@@ -8,6 +8,7 @@ import {
   filterSpace,
   filterGroup,
   filterPage,
+  filterComment,
   filterSearchResult,
 } from "./lib/filters.js";
 import { convertProseMirrorToMarkdown } from "./lib/markdown-converter.js";
@@ -16,6 +17,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { updatePageContentRealtime } from "./lib/collaboration.js";
 import { getCollabToken, performLogin } from "./lib/auth-utils.js";
+import { markdownToTiptapJson } from "./lib/markdown-to-json.js";
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -328,6 +330,189 @@ class DocmostClient {
     );
     return Promise.all(promises);
   }
+
+  // --- Comment Methods ---
+
+  async listComments(pageId: string) {
+    await this.ensureAuthenticated();
+    let allComments: any[] = [];
+    let cursor: string | null = null;
+
+    do {
+      const payload: Record<string, any> = { pageId, limit: 100 };
+      if (cursor) payload.cursor = cursor;
+
+      const response = await this.client.post("/comments", payload);
+      const data = response.data.data || response.data;
+      const items = data.items || [];
+      allComments = allComments.concat(items);
+      cursor = data.meta?.nextCursor || null;
+    } while (cursor);
+
+    return allComments.map((comment: any) => {
+      const markdown = comment.content
+        ? convertProseMirrorToMarkdown(comment.content)
+        : "";
+      return filterComment(comment, markdown);
+    });
+  }
+
+  async getComment(commentId: string) {
+    await this.ensureAuthenticated();
+    const response = await this.client.post("/comments/info", { commentId });
+    const comment = response.data.data || response.data;
+    const markdown = comment.content
+      ? convertProseMirrorToMarkdown(comment.content)
+      : "";
+    return {
+      data: filterComment(comment, markdown),
+      success: true,
+    };
+  }
+
+  async createComment(
+    pageId: string,
+    content: string,
+    type: "page" | "inline" = "page",
+    selection?: string,
+    parentCommentId?: string,
+  ) {
+    await this.ensureAuthenticated();
+    const jsonContent = await markdownToTiptapJson(content);
+    const payload: Record<string, any> = {
+      pageId,
+      content: JSON.stringify(jsonContent),
+      type,
+    };
+    if (selection) payload.selection = selection;
+    if (parentCommentId) payload.parentCommentId = parentCommentId;
+
+    const response = await this.client.post("/comments/create", payload);
+    const comment = response.data.data || response.data;
+    const markdown = comment.content
+      ? convertProseMirrorToMarkdown(comment.content)
+      : content;
+    return {
+      data: filterComment(comment, markdown),
+      success: true,
+    };
+  }
+
+  async updateComment(commentId: string, content: string) {
+    await this.ensureAuthenticated();
+    const jsonContent = await markdownToTiptapJson(content);
+    const response = await this.client.post("/comments/update", {
+      commentId,
+      content: JSON.stringify(jsonContent),
+    });
+    const comment = response.data.data || response.data;
+    const markdown = comment?.content
+      ? convertProseMirrorToMarkdown(comment.content)
+      : content;
+    return {
+      data: filterComment(comment, markdown),
+      success: true,
+    };
+  }
+
+  async deleteComment(commentId: string) {
+    await this.ensureAuthenticated();
+    return this.client
+      .post("/comments/delete", { commentId })
+      .then((res) => res.data);
+  }
+
+  /**
+   * Check for new comments across pages in a space (optionally scoped to a subtree).
+   * 1. Fetch all pages in space
+   * 2. If parentPageId given, keep only descendants of that page
+   * 3. Fetch comments for all pages in scope in parallel, filter by createdAt > since
+   *
+   * NOTE: We intentionally do NOT pre-filter pages by updatedAt — Docmost does
+   * not bump page.updatedAt when a comment is added, so such a filter would
+   * silently miss comments on pages that were not otherwise edited.
+   */
+  async checkNewComments(
+    spaceId: string,
+    since: string,
+    parentPageId?: string,
+  ) {
+    await this.ensureAuthenticated();
+
+    const sinceDate = new Date(since);
+    if (isNaN(sinceDate.getTime())) {
+      throw new Error(`Invalid 'since' timestamp: ${since}`);
+    }
+
+    // 1. Get all pages in the space
+    const allPages = await this.paginateAll<any>("/pages/recent", { spaceId });
+
+    // 2. If parentPageId specified, build set of descendant page IDs via BFS
+    let allowedPageIds: Set<string> | null = null;
+    if (parentPageId) {
+      allowedPageIds = new Set<string>();
+      const pageMap = new Map<string, any[]>();
+      for (const page of allPages) {
+        const pid = page.parentPageId || "__root__";
+        if (!pageMap.has(pid)) pageMap.set(pid, []);
+        pageMap.get(pid)!.push(page);
+      }
+      const queue = [parentPageId];
+      allowedPageIds.add(parentPageId);
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        for (const child of pageMap.get(current) || []) {
+          allowedPageIds.add(child.id);
+          queue.push(child.id);
+        }
+      }
+    }
+
+    // 3. Scope to subtree if requested
+    const pagesInScope = allPages.filter(
+      (page: any) => !allowedPageIds || allowedPageIds.has(page.id),
+    );
+
+    // 4. Fetch comments for all pages in parallel, filter by createdAt > since
+    let skippedPages = 0;
+    const settled = await Promise.all(
+      pagesInScope.map(async (page: any) => {
+        try {
+          const comments = await this.listComments(page.id);
+          const newComments = comments.filter(
+            (c: any) => new Date(c.createdAt) > sinceDate,
+          );
+          return newComments.length > 0
+            ? { pageId: page.id, pageTitle: page.title, comments: newComments }
+            : null;
+        } catch {
+          skippedPages++;
+          return null;
+        }
+      }),
+    );
+
+    const results = settled.filter(
+      (r): r is NonNullable<typeof r> => r !== null,
+    );
+
+    const totalNewComments = results.reduce(
+      (sum, r) => sum + r.comments.length,
+      0,
+    );
+
+    return {
+      since,
+      scope: parentPageId
+        ? `subtree of ${parentPageId}`
+        : `space ${spaceId}`,
+      checkedPages: pagesInScope.length,
+      pagesWithNewComments: results.length,
+      totalNewComments,
+      skippedPages,
+      comments: results,
+    };
+  }
 }
 
 const docmostClient = new DocmostClient(API_URL);
@@ -540,6 +725,151 @@ server.registerTool(
   },
   async ({ query, spaceId }) => {
     const result = await docmostClient.search(query, spaceId);
+    return jsonContent(result);
+  },
+);
+
+// --- Comment Tools ---
+
+// Tool: list_comments
+server.registerTool(
+  "list_comments",
+  {
+    description:
+      "List all comments on a page. Returns comments with content converted to Markdown.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to list comments for"),
+    },
+  },
+  async ({ pageId }) => {
+    const comments = await docmostClient.listComments(pageId);
+    return jsonContent(comments);
+  },
+);
+
+// Tool: get_comment
+server.registerTool(
+  "get_comment",
+  {
+    description: "Get a single comment by ID with content as Markdown.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment"),
+    },
+  },
+  async ({ commentId }) => {
+    const comment = await docmostClient.getComment(commentId);
+    return jsonContent(comment);
+  },
+);
+
+// Tool: create_comment
+server.registerTool(
+  "create_comment",
+  {
+    description:
+      "Create a new comment on a page. Content is provided as Markdown and automatically converted to the required format.",
+    inputSchema: {
+      pageId: z.string().describe("ID of the page to comment on"),
+      content: z.string().describe("Comment content in Markdown format"),
+      type: z
+        .enum(["page", "inline"])
+        .optional()
+        .describe(
+          "Comment type: 'page' for general page comment (default), 'inline' for text selection comment",
+        ),
+      selection: z
+        .string()
+        .optional()
+        .describe(
+          "Selected text for inline comments (max 250 chars). Required when type is 'inline'.",
+        ),
+      parentCommentId: z
+        .string()
+        .optional()
+        .describe("Parent comment ID to create a reply (max 2 nesting levels)"),
+    },
+  },
+  async ({ pageId, content, type, selection, parentCommentId }) => {
+    if (type === "inline" && !selection) {
+      throw new Error("'selection' is required when type is 'inline'");
+    }
+    const result = await docmostClient.createComment(
+      pageId,
+      content,
+      type || "page",
+      selection,
+      parentCommentId,
+    );
+    return jsonContent(result);
+  },
+);
+
+// Tool: update_comment
+server.registerTool(
+  "update_comment",
+  {
+    description:
+      "Update an existing comment's content. Only the comment creator can update it. Content is provided as Markdown.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment to update"),
+      content: z.string().describe("New comment content in Markdown format"),
+    },
+  },
+  async ({ commentId, content }) => {
+    const result = await docmostClient.updateComment(commentId, content);
+    return jsonContent(result);
+  },
+);
+
+// Tool: delete_comment
+server.registerTool(
+  "delete_comment",
+  {
+    description:
+      "Delete a comment. Only the comment creator or space admin can delete it.",
+    inputSchema: {
+      commentId: z.string().describe("ID of the comment to delete"),
+    },
+  },
+  async ({ commentId }) => {
+    await docmostClient.deleteComment(commentId);
+    return {
+      content: [
+        { type: "text", text: `Successfully deleted comment ${commentId}` },
+      ],
+    };
+  },
+);
+
+// Tool: check_new_comments
+server.registerTool(
+  "check_new_comments",
+  {
+    description:
+      "Check for new comments across pages in a space since a given timestamp. " +
+      "Optionally scope to a page subtree (folder). Returns only comments created after the specified time.",
+    inputSchema: {
+      spaceId: z.string().describe("Space ID to check for new comments"),
+      since: z
+        .string()
+        .describe(
+          "ISO 8601 timestamp — only return comments created after this time (e.g. '2026-03-10T00:00:00Z')",
+        ),
+      parentPageId: z
+        .string()
+        .optional()
+        .describe(
+          "Optional root page ID to scope the check to a subtree (folder). " +
+          "Only pages under this parent will be checked.",
+        ),
+    },
+  },
+  async ({ spaceId, since, parentPageId }) => {
+    const result = await docmostClient.checkNewComments(
+      spaceId,
+      since,
+      parentPageId,
+    );
     return jsonContent(result);
   },
 );
