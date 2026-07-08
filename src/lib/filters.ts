@@ -43,6 +43,7 @@ export function filterGroup(group: any) {
 export function filterPage(page: any, content?: string, subpages?: any[]) {
   return {
     id: page.id,
+    slugId: page.slugId,
     title: page.title,
     parentPageId: page.parentPageId,
     spaceId: page.spaceId,
@@ -63,6 +64,7 @@ export function filterPage(page: any, content?: string, subpages?: any[]) {
 export function filterSearchResult(result: any) {
   return {
     id: result.id,
+    slugId: result.slugId,
     title: result.title,
     parentPageId: result.parentPageId,
     createdAt: result.createdAt,

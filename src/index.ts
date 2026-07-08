@@ -283,8 +283,11 @@ class DocmostClient {
       spaceId,
     });
 
-    // Filter search results (data is directly an array)
-    const items = response.data?.data || [];
+    // Docmost's /search response envelope differs by version: older releases return
+    // `data` as a direct array, while newer ones (>= ~0.9x) return
+    // `{ data: { items: [...] } }`. Support both so search doesn't crash on newer servers.
+    const payload = response.data?.data;
+    const items = Array.isArray(payload) ? payload : (payload?.items ?? []);
     const filteredItems = items.map((item: any) => filterSearchResult(item));
 
     return {
