@@ -233,6 +233,20 @@ class DocmostClient {
       await this.movePage(newPageId, parentPageId);
     }
 
+    // 3. Math correction. Docmost's server-side markdown import corrupts LaTeX inside
+    //    math (& -> &amp;, < -> &lt;, > -> &gt;, and \\ -> \). If the source contains
+    //    math, rewrite the content through the local marked+Tiptap pipeline (which carries
+    //    LaTeX in data attributes and stores it verbatim) via realtime collaboration.
+    if (/\$/.test(content)) {
+      try {
+        const baseURL = this.client.defaults.baseURL || "";
+        const collabToken = await getCollabToken(baseURL, this.token!);
+        await updatePageContentRealtime(newPageId, content, collabToken, baseURL);
+      } catch (e: any) {
+        console.error("Math correction (realtime) failed; page kept as imported:", e?.message);
+      }
+    }
+
     // Return the final page object
     return this.getPage(newPageId);
   }
