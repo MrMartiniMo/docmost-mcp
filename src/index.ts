@@ -228,6 +228,12 @@ class DocmostClient {
     });
     const newPageId = response.data.data.id;
 
+    // Docmost derives imported titles from the multipart filename and normalizes
+    // spaces to underscores. Restore the exact caller-supplied title explicitly.
+    if (response.data.data.title !== title) {
+      await this.client.post("/pages/update", { pageId: newPageId, title });
+    }
+
     // 2. Move to parent if needed
     if (parentPageId) {
       await this.movePage(newPageId, parentPageId);
