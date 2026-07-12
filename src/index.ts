@@ -228,9 +228,29 @@ class DocmostClient {
     });
     const newPageId = response.data.data.id;
 
+    // Docmost derives imported titles from the multipart filename and normalizes
+    // spaces to underscores. Restore the exact caller-supplied title explicitly.
+    if (response.data.data.title !== title) {
+      await this.client.post("/pages/update", { pageId: newPageId, title });
+    }
+
     // 2. Move to parent if needed
     if (parentPageId) {
       await this.movePage(newPageId, parentPageId);
+    }
+
+    // 3. Math correction. Docmost's server-side markdown import corrupts LaTeX inside
+    //    math (& -> &amp;, < -> &lt;, > -> &gt;, and \\ -> \). If the source contains
+    //    math, rewrite the content through the local marked+Tiptap pipeline (which carries
+    //    LaTeX in data attributes and stores it verbatim) via realtime collaboration.
+    if (/\$/.test(content)) {
+      try {
+        const baseURL = this.client.defaults.baseURL || "";
+        const collabToken = await getCollabToken(baseURL, this.token!);
+        await updatePageContentRealtime(newPageId, content, collabToken, baseURL);
+      } catch (e: any) {
+        console.error("Math correction (realtime) failed; page kept as imported:", e?.message);
+      }
     }
 
     // Return the final page object
@@ -283,8 +303,11 @@ class DocmostClient {
       spaceId,
     });
 
-    // Filter search results (data is directly an array)
-    const items = response.data?.data || [];
+    // Docmost's /search response envelope differs by version: older releases return
+    // `data` as a direct array, while newer ones (>= ~0.9x) return
+    // `{ data: { items: [...] } }`. Support both so search doesn't crash on newer servers.
+    const payload = response.data?.data;
+    const items = Array.isArray(payload) ? payload : (payload?.items ?? []);
     const filteredItems = items.map((item: any) => filterSearchResult(item));
 
     return {

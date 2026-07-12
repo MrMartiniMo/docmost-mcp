@@ -6,6 +6,9 @@ import { marked } from "marked";
 import { generateJSON } from "@tiptap/html";
 import { JSDOM } from "jsdom";
 import { tiptapExtensions } from "./tiptap-extensions.js";
+import { installMathMarkdown } from "./math-markdown.js";
+
+installMathMarkdown();
 
 // Setup DOM environment for Tiptap HTML parsing in Node.js
 const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>");
