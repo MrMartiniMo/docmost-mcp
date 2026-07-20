@@ -207,13 +207,17 @@ class DocmostClient {
       }
     }
 
-    // 1. Create content via Import (using multipart/form-data)
+    // 1. Create content via Import (using multipart/form-data).
+    // NOTE: Docmost's /pages/import derives the page title from the uploaded
+    // file's name and sanitizes it (spaces -> underscores, etc.), so the
+    // filename must NOT be relied upon to carry the real title. We upload with
+    // a neutral filename and set the title verbatim afterwards (step 2).
     const form = new FormData();
     form.append("spaceId", spaceId);
 
     const fileContent = Buffer.from(content, "utf-8");
     form.append("file", fileContent, {
-      filename: `${title || "import"}.md`,
+      filename: "import.md",
       contentType: "text/markdown",
     });
 
@@ -228,7 +232,14 @@ class DocmostClient {
     });
     const newPageId = response.data.data.id;
 
-    // 2. Move to parent if needed
+    // 2. Set the title VERBATIM via the same REST endpoint update_page uses.
+    // This preserves spaces and special characters (·, parentheses, #, ...),
+    // which /pages/import mangles. See Vikunja #1080.
+    if (title) {
+      await this.client.post("/pages/update", { pageId: newPageId, title });
+    }
+
+    // 3. Move to parent if needed
     if (parentPageId) {
       await this.movePage(newPageId, parentPageId);
     }
