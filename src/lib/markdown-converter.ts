@@ -121,15 +121,39 @@ export function convertProseMirrorToMarkdown(content: any): string {
         const youtubeUrl = node.attrs?.src || "";
         return `📺 [YouTube Video](${youtubeUrl})`;
 
-      case "table":
-        return nodeContent.map(processNode).join("\n");
+      case "table": {
+        // GFM exige una fila separadora `| --- |` debajo de la cabecera. Sin ella,
+        // quien lea esta pagina con get_page y la reescriba con update_page (que es
+        // full-replace) deja de tener tablas: el parser las convierte en parrafos, y
+        // el read-back sale igual que antes, asi que el destrozo es invisible.
+        // Medido el 2026-08-06 sobre el runbook del recommender de empleo, que perdio
+        // 12 de sus 16 tablas por esta via. Vikunja id 1351.
+        const rows: string[] = nodeContent.map(processNode);
+        if (rows.length > 0) {
+          const cols =
+            (nodeContent[0]?.content || []).reduce(
+              (n: number, cell: any) => n + (cell.attrs?.colspan || 1),
+              0,
+            ) || 1;
+          rows.splice(1, 0, "| " + Array(cols).fill("---").join(" | ") + " |");
+        }
+        return rows.join("\n");
+      }
 
       case "tableRow":
         return "| " + nodeContent.map(processNode).join(" | ") + " |";
 
       case "tableCell":
       case "tableHeader":
-        return nodeContent.map(processNode).join("");
+        // Una celda con salto de linea parte la fila al reescribirla, y una barra sin
+        // escapar corre una columna. Las dos roturas son del mismo tipo que la de
+        // arriba: silenciosas, y solo visibles despues de guardar.
+        return nodeContent
+          .map(processNode)
+          .join(" ")
+          .replace(/\s*\n\s*/g, " ")
+          .replace(/\|/g, "\\|")
+          .trim();
 
       case "callout":
         const calloutType = node.attrs?.type || "info";

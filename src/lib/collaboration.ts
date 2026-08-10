@@ -18,6 +18,44 @@ global.WebSocket = WebSocket;
 // Navigator is read-only in newer Node versions and already exists
 // global.navigator = dom.window.navigator;
 
+/**
+ * Reconstruye la fila separadora `| --- |` en los bloques de tabla que la hayan
+ * perdido. Segunda linea de defensa del mismo fallo que arregla
+ * markdown-converter.ts: si el markdown entrante trae filas de tabla sin
+ * separador (porque lo escribio un humano, un modelo, o un lector antiguo),
+ * `marked` no ve una tabla y update_page guarda parrafos con barras dentro.
+ * Vikunja id 1351.
+ */
+export function ensureTableSeparators(markdown: string): string {
+  const lines = markdown.split("\n");
+  const out: string[] = [];
+  const esFila = (s: string) => /^\s*\|.*\|\s*$/.test(s);
+  const esSeparador = (s: string) => /^\s*\|(\s*:?-{2,}:?\s*\|)+\s*$/.test(s);
+  const celdas = (s: string) => s.trim().replace(/^\||\|$/g, "").split("|").length;
+
+  let enFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(```|~~~)/.test(line)) enFence = !enFence;
+    out.push(line);
+    if (enFence) continue;
+
+    // arranque de bloque de tabla: fila cuya anterior no lo era
+    const anteriorEsFila = i > 0 && esFila(lines[i - 1]);
+    if (!esFila(line) || esSeparador(line) || anteriorEsFila) continue;
+
+    const siguiente = lines[i + 1];
+    if (siguiente !== undefined && esFila(siguiente) && !esSeparador(siguiente)) {
+      const n = celdas(line);
+      out.push("| " + Array(n).fill("---").join(" | ") + " |");
+      console.error(
+        `[docmost-mcp] fila separadora reconstruida en la tabla de la linea ${i + 1} (${n} columnas)`,
+      );
+    }
+  }
+  return out.join("\n");
+}
+
 export async function updatePageContentRealtime(
   pageId: string,
   markdownContent: string,
@@ -30,7 +68,7 @@ export async function updatePageContentRealtime(
   );
 
   // 1. Convert Markdown to HTML
-  const html = await marked.parse(markdownContent);
+  const html = await marked.parse(ensureTableSeparators(markdownContent));
 
   // 2. Convert HTML to ProseMirror JSON
   const tiptapJson = generateJSON(html, tiptapExtensions);
