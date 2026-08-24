@@ -99,7 +99,14 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return nodeContent.map(processNode).join("\n");
 
       case "blockquote":
-        return nodeContent.map((n: any) => "> " + processNode(n)).join("\n");
+        // Same fix as processListItem: the `> ` goes per LINE. Applied per child,
+        // a list inside the quote fell out of it from the second item onwards.
+        return nodeContent
+          .map(processNode)
+          .join("\n")
+          .split("\n")
+          .map((line: string) => (line ? `> ${line}` : ">"))
+          .join("\n");
 
       case "horizontalRule":
         return "---";
@@ -185,10 +192,25 @@ export function convertProseMirrorToMarkdown(content: any): string {
 
   const processListItem = (item: any, prefix: string): string => {
     const itemContent = item.content || [];
-    const lines = itemContent.map(processNode);
-    return lines
+
+    // Prefix per LINE, not per child. `itemContent.map(processNode)` yields one
+    // string PER CHILD, and a child can span several lines: a three-item sublist
+    // is ONE child and THREE lines. Indenting only the first left the rest at
+    // column zero, so from the second item onwards they came back one level up
+    // and the hierarchy was gone for good.
+    //
+    // The continuation indent is derived from the prefix (2 for `-`, 3 for `1.`)
+    // because CommonMark wants it aligned with the column where the item content
+    // starts, not a fixed two spaces -- which is why the numbered case failed
+    // worst, splitting the parent list in two.
+    const indent = " ".repeat(prefix.length + 1);
+
+    return itemContent
+      .map(processNode)
+      .join("\n")
+      .split("\n")
       .map((line: string, i: number) =>
-        i === 0 ? `${prefix} ${line}` : `  ${line}`,
+        i === 0 ? `${prefix} ${line}` : line ? `${indent}${line}` : line,
       )
       .join("\n");
   };
