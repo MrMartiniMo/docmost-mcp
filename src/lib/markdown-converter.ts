@@ -105,7 +105,17 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return "---";
 
       case "hardBreak":
-        return "\n";
+        // A bare newline is a SOFT break in Markdown, and `marked` renders it as
+        // a space. So every hard break in a page is silently turned into a space
+        // the next time that page is written back through update_page, and the
+        // tool still reports success. The mutation is length-preserving --
+        // "a\nb\nc" and "a b c" are both five characters -- so no size check
+        // catches it either.
+        //
+        // Emit the CommonMark/GFM hard break instead. The other valid syntax,
+        // two trailing spaces, was not used because it is invisible and any
+        // trailing-whitespace trim silently removes it again.
+        return "\\\n";
 
       case "image":
         const imgAlt = node.attrs?.alt || "";
