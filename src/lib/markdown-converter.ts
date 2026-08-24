@@ -2,6 +2,53 @@
  * Convert ProseMirror/TipTap JSON content to Markdown
  * Supports all Docmost-specific node types and extensions
  */
+/**
+ * Wraps an inline code span, choosing the delimiter from its CONTENT.
+ *
+ * It used to be a single backtick every time, so content holding backticks left
+ * the delimiter trapped inside itself and markdown could no longer tell where the
+ * code ended. On one of our pages that is ~116 characters lost per write: its
+ * phase diagram is ASCII art built from runs of backticks inside a node carrying
+ * the `code` mark.
+ *
+ * This is not a design choice, it is the algorithm CommonMark already defines: the
+ * delimiter is a run LONGER than the longest run inside, padded with one space on
+ * each side when required. The padding is needed in two cases and the second is
+ * easy to forget -- when the content starts or ends with a backtick (it would fuse
+ * with the delimiter), and when it starts AND ends with a space, because then the
+ * parser strips one from each side and without the padding those spaces are lost.
+ *
+ * Code with no backticks inside still comes out with a single backtick, exactly as
+ * before: this only fires when it has to.
+ */
+function delimitCode(content: string): string {
+  const runs = content.match(/`+/g) || [];
+  const longest = runs.reduce((m: number, r: string) => Math.max(m, r.length), 0);
+  const delimiter = "`".repeat(longest + 1);
+  const wouldFuse = content.startsWith("`") || content.endsWith("`");
+  const parserWouldStripSpaces =
+    content.startsWith(" ") && content.endsWith(" ") && content.trim() !== "";
+
+  // A trailing BACKSLASH eats the closing tick. CommonMark says there are no
+  // escapes inside a code span, but the inline lexer treats it as one anyway:
+  // the span does not close where it should, every boundary after it shifts,
+  // and a later bold run comes back as literal text. Windows paths do this
+  // (`C:\\Users\\name\\`).
+  //
+  // TWO conditions are required, which is why it resists reproduction: the
+  // trailing backslash AND another code span further along in the same
+  // paragraph. With only one of them nothing happens, so a minimal fixture with
+  // just the backslash reports that all is well.
+  //
+  // Padding fixes it because it separates the backslash from the tick, and the
+  // parser strips the space on the way back.
+  const eatsItsOwnCloser = content.endsWith("\\");
+
+  const pad =
+    wouldFuse || parserWouldStripSpaces || eatsItsOwnCloser ? " " : "";
+  return `${delimiter}${pad}${content}${pad}${delimiter}`;
+}
+
 export function convertProseMirrorToMarkdown(content: any): string {
   if (!content || !content.content) return "";
 
@@ -39,7 +86,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
                 textContent = `*${textContent}*`;
                 break;
               case "code":
-                textContent = `\`${textContent}\``;
+                textContent = delimitCode(textContent);
                 break;
               case "link":
                 textContent = `[${textContent}](${mark.attrs?.href || ""})`;
