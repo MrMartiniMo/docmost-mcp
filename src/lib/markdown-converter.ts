@@ -2,10 +2,73 @@
  * Convert ProseMirror/TipTap JSON content to Markdown
  * Supports all Docmost-specific node types and extensions
  */
+/**
+ * Escapes, AT LINE START, whatever markdown would read as the opening of a block.
+ *
+ * The converter emitted a node's text verbatim, so a paragraph whose text begins
+ * with a block marker came back as that block: prose turned into structure. The
+ * case that surfaced it is a paragraph reading "Grupo motor" followed by hard
+ * breaks and the literal lines "- Rafa", "- Nuria" -- which came back as a nested
+ * list nobody wrote.
+ *
+ * THE RISK HERE IS OVER-\\APING, not under-escaping: stray backslashes are
+ * visible in the rendered page, and that damage is both worse and far more
+ * widespread than the bug being fixed. Hence three decisions:
+ *
+ * - Markers require the space CommonMark requires. `#tag` is not a heading and
+ *   `1.5 million` is not a list, so neither is touched.
+ * - Line starts only. A hyphen mid-sentence, a subtraction and a date are not
+ *   syntax and are left alone.
+ * - Thematic breaks (`---`, `___`, `***`) are NOT escaped: they were measured to
+ *   survive the round trip already, and adding a backslash where none is needed
+ *   is exactly the harm this is trying to avoid.
+ *
+ * Code fences are escaped whole rather than just their first character: leaving
+ * two bare backticks would open an inline code span, trading one bug for another.
+ */
+const BLOCK_OPENERS: Array<[RegExp, string]> = [
+  [/^( {0,3})([-+*])(\s|$)/, "$1\\$2$3"],
+  [/^( {0,3})(\d{1,9})([.)])(\s|$)/, "$1$2\\$3$4"],
+  [/^( {0,3})(#{1,6})(\s|$)/, "$1\\$2$3"],
+  [/^( {0,3})(>)/, "$1\\$2"],
+];
+
+function escapeLineStarts(text: string): string {
+  return text
+    .split("\n")
+    .map((line: string) => {
+      // A backtick fence is only a fence when the rest of the line holds NO
+      // backticks: CommonMark forbids backticks in the info string after a
+      // backtick fence. Without this condition, a code span long enough to need a
+      // three-backtick delimiter gets its delimiter escaped when it opens a
+      // paragraph, which breaks the span. Tilde fences carry no such restriction,
+      // so they are handled separately.
+      const fence = /^( {0,3})(`{3,}|~{3,})/.exec(line);
+      const isReallyAFence =
+        fence && (fence[2][0] === "~" || !line.slice(fence[0].length).includes("`"));
+      if (fence && isReallyAFence) {
+        const escaped = fence[2]
+          .split("")
+          .map((c: string) => "\\" + c)
+          .join("");
+        return fence[1] + escaped + line.slice(fence[0].length);
+      }
+      for (const [pattern, replacement] of BLOCK_OPENERS) {
+        if (pattern.test(line)) return line.replace(pattern, replacement);
+      }
+      return line;
+    })
+    .join("\n");
+}
+
 export function convertProseMirrorToMarkdown(content: any): string {
   if (!content || !content.content) return "";
 
-  const processNode = (node: any): string => {
+  // The second parameter is an OBJECT rather than a boolean on purpose: half a
+  // dozen call sites do `nodeContent.map(processNode)`, and `map` passes the
+  // INDEX as the second argument. A boolean would silently be false for the
+  // first child and true for every other one. A number has no `.inTableCell`.
+  const processNode = (node: any, options?: any): string => {
     const type = node.type;
     const nodeContent = node.content || [];
 
@@ -17,9 +80,21 @@ export function convertProseMirrorToMarkdown(content: any): string {
         const text = nodeContent.map(processNode).join("");
         const align = node.attrs?.textAlign;
         if (align && align !== "left") {
+          // Not escaped on purpose: the content sits inside an HTML block,
+          // where markdown is not interpreted, so a backslash here would only
+          // manage to get itself printed.
           return `<div align="${align}">${text}</div>`;
         }
-        return text || "";
+        // The paragraph is the right place to escape: it is where the LINE
+        // structure is known and everything inside is text, never syntax we
+        // emitted ourselves.
+        //
+        // Except inside a table CELL, where the text sits after `| ` and never
+        // starts a line: a backslash there protects nothing and PRINTS. Without
+        // this exception, 13 live pages on our instance gained 40 visible
+        // backslashes, almost all in cells whose entire content was `#`, `-` or
+        // `1.` -- while every unit test stayed green.
+        return options?.inTableCell ? text || "" : escapeLineStarts(text || "");
 
       case "heading":
         const level = node.attrs?.level || 1;
@@ -129,7 +204,9 @@ export function convertProseMirrorToMarkdown(content: any): string {
 
       case "tableCell":
       case "tableHeader":
-        return nodeContent.map(processNode).join("");
+        return nodeContent
+          .map((n: any) => processNode(n, { inTableCell: true }))
+          .join("");
 
       case "callout":
         const calloutType = node.attrs?.type || "info";
