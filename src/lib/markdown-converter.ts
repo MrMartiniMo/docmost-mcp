@@ -2,6 +2,33 @@
  * Convert ProseMirror/TipTap JSON content to Markdown
  * Supports all Docmost-specific node types and extensions
  */
+/**
+ * Wrap text in an emphasis delimiter, keeping any surrounding whitespace OUTSIDE.
+ *
+ * Markdown does not allow whitespace hugging the inside of a delimiter: in
+ * `**text **` the closing `**` is preceded by a space, so it closes nothing and
+ * the asterisks are rendered as literal TEXT. Once a page is written back that
+ * way the damage is permanent -- they have stopped being syntax and become
+ * content, so rewriting never recovers them.
+ *
+ * The same change fixes the confusing output when emphasis spans inline code.
+ * Because TipTap's `code` mark is EXCLUSIVE, `**A `c` B**` is stored as three
+ * nodes (bold / code without bold / bold), which used to serialize as
+ * `**A **`c`** B**` and now serializes as `**A** `c` **B**`.
+ *
+ * A node that is only whitespace is returned untouched: there is nothing to
+ * emphasise, and `** **` would not be valid either.
+ */
+function wrapKeepingWhitespaceOutside(text: string, delimiter: string): string {
+  const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+  if (!m) return `${delimiter}${text}${delimiter}`;
+
+  const [, before, core, after] = m;
+  if (!core) return text;
+
+  return `${before}${delimiter}${core}${delimiter}${after}`;
+}
+
 export function convertProseMirrorToMarkdown(content: any): string {
   if (!content || !content.content) return "";
 
@@ -33,10 +60,10 @@ export function convertProseMirrorToMarkdown(content: any): string {
           for (const mark of node.marks) {
             switch (mark.type) {
               case "bold":
-                textContent = `**${textContent}**`;
+                textContent = wrapKeepingWhitespaceOutside(textContent, "**");
                 break;
               case "italic":
-                textContent = `*${textContent}*`;
+                textContent = wrapKeepingWhitespaceOutside(textContent, "*");
                 break;
               case "code":
                 textContent = `\`${textContent}\``;
@@ -45,7 +72,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
                 textContent = `[${textContent}](${mark.attrs?.href || ""})`;
                 break;
               case "strike":
-                textContent = `~~${textContent}~~`;
+                textContent = wrapKeepingWhitespaceOutside(textContent, "~~");
                 break;
               case "underline":
                 textContent = `<u>${textContent}</u>`;
