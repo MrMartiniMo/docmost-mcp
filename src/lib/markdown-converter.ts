@@ -2,6 +2,36 @@
  * Convert ProseMirror/TipTap JSON content to Markdown
  * Supports all Docmost-specific node types and extensions
  */
+const LIST_NODES = new Set(["bulletList", "orderedList", "taskList"]);
+
+/**
+ * Joins the top-level blocks, inserting a separator between two ADJACENT lists.
+ *
+ * Two sibling lists in a row do not exist in markdown: they merge into one, blank
+ * line or not. A page alternating task lists and bullet lists therefore came back
+ * as a single bullet list -- and, being mixed, it was no longer a task list, so
+ * the checkboxes went with it. One page on our instance alternates them five
+ * times.
+ *
+ * `<!-- -->` is the usual CommonMark idiom for cutting a list: the comment is an
+ * HTML block, so it interrupts the list, and it has no node in the schema, so it
+ * is discarded on the way back. It leaves no trace.
+ *
+ * This is not specific to task lists. Two adjacent bullet lists were merging just
+ * as quietly.
+ */
+function joinBlocks(nodes: any[], process: (n: any) => string): string {
+  const parts: string[] = [];
+  nodes.forEach((node: any, i: number) => {
+    const previous = nodes[i - 1];
+    if (previous && LIST_NODES.has(previous.type) && LIST_NODES.has(node.type)) {
+      parts.push("<!-- -->");
+    }
+    parts.push(process(node));
+  });
+  return parts.join("\n\n");
+}
+
 export function convertProseMirrorToMarkdown(content: any): string {
   if (!content || !content.content) return "";
 
@@ -11,7 +41,7 @@ export function convertProseMirrorToMarkdown(content: any): string {
 
     switch (type) {
       case "doc":
-        return nodeContent.map(processNode).join("\n\n");
+        return joinBlocks(nodeContent, processNode);
 
       case "paragraph":
         const text = nodeContent.map(processNode).join("");
