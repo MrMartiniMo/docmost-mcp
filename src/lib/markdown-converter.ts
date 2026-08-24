@@ -2,6 +2,24 @@
  * Convert ProseMirror/TipTap JSON content to Markdown
  * Supports all Docmost-specific node types and extensions
  */
+/**
+ * Escapes a value for an HTML attribute, and only as far as strictly necessary.
+ *
+ * Inside double quotes, HTML only requires the quote and the ampersand to be
+ * escaped; `<` and `>` are legal as-is. That is not pedantry: the parser behind
+ * `generateJSON` decodes `&amp;` and `&quot;` but does NOT decode `&lt;` or
+ * numeric entities such as `&#10;`, so anything escaped beyond the minimum comes
+ * back as literal text and CORRUPTS the value. Each case was probed against the
+ * real parser before this was written.
+ *
+ * The newline -- which is how most of these nodes end on imported pages --
+ * travels RAW for the same reason: inside the attribute it survives untouched; as
+ * a numeric entity it does not.
+ */
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
 export function convertProseMirrorToMarkdown(content: any): string {
   if (!content || !content.content) return "";
 
@@ -148,12 +166,17 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return `${detailsText}\n</details>`;
 
       case "mathInline":
-        const inlineMath = node.attrs?.text || "";
-        return `$${inlineMath}$`;
+        // HTML rather than `$...$` on purpose: dollars are AMBIGUOUS. "It costs
+        // $5 and then $10 a month" would be read back as maths, and the node text
+        // usually ends in a newline, which split the sentence in two.
+        return `<span data-type="mathInline" data-text="${escapeAttribute(
+          node.attrs?.text || "",
+        )}"></span>`;
 
       case "mathBlock":
-        const blockMath = node.attrs?.text || "";
-        return `$$\n${blockMath}\n$$`;
+        return `<div data-type="mathBlock" data-text="${escapeAttribute(
+          node.attrs?.text || "",
+        )}"></div>`;
 
       case "mention":
         const mentionLabel = node.attrs?.label || node.attrs?.id || "";
