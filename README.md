@@ -35,6 +35,14 @@ npm install
 npm run build
 ```
 
+### Docker
+
+Build the image with Docker directly:
+
+```bash
+docker build -t docmost-mcp:latest .
+```
+
 ## Configuration
 
 This server requires the following environment variables to be set:
@@ -53,6 +61,32 @@ Add the following to your MCP configuration (e.g. `claude_desktop_config.json`):
     "docmost-local": {
       "command": "node",
       "args": ["./build/index.js"],
+      "env": {
+        "DOCMOST_API_URL": "http://localhost:3000/api",
+        "DOCMOST_EMAIL": "test@docmost.com",
+        "DOCMOST_PASSWORD": "test"
+      }
+    }
+  }
+}
+```
+
+## Usage with Docker
+
+Since the server communicates over stdio, run the container in interactive mode (`-i`) and remove it on exit (`--rm`). Add the following to your MCP configuration (e.g. `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "docmost-mcp": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "DOCMOST_API_URL",
+        "-e", "DOCMOST_EMAIL",
+        "-e", "DOCMOST_PASSWORD",
+        "docmost-mcp:latest"
+      ],
       "env": {
         "DOCMOST_API_URL": "http://localhost:3000/api",
         "DOCMOST_EMAIL": "test@docmost.com",
