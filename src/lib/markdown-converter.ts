@@ -99,7 +99,14 @@ export function convertProseMirrorToMarkdown(content: any): string {
         return nodeContent.map(processNode).join("\n");
 
       case "blockquote":
-        return nodeContent.map((n: any) => "> " + processNode(n)).join("\n");
+        return nodeContent
+          .map((n: any) =>
+            processNode(n)
+              .split("\n")
+              .map((line) => "> " + line)
+              .join("\n"),
+          )
+          .join("\n");
 
       case "horizontalRule":
         return "---";
@@ -121,8 +128,15 @@ export function convertProseMirrorToMarkdown(content: any): string {
         const youtubeUrl = node.attrs?.src || "";
         return `📺 [YouTube Video](${youtubeUrl})`;
 
-      case "table":
-        return nodeContent.map(processNode).join("\n");
+      case "table": {
+        const rows = nodeContent.map(processNode);
+        if (rows.length === 0) return "";
+        // Markdown needs a delimiter row under the header. Without it the
+        // output renders as a paragraph of pipes instead of a table.
+        const columns = Math.max(1, (nodeContent[0]?.content || []).length);
+        const separator = `| ${Array.from({ length: columns }, () => "---").join(" | ")} |`;
+        return [rows[0], separator, ...rows.slice(1)].join("\n");
+      }
 
       case "tableRow":
         return "| " + nodeContent.map(processNode).join(" | ") + " |";
